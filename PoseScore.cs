@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
+using TMPro;
 
 public class PoseScorer : MonoBehaviour
 {
@@ -14,23 +15,19 @@ public class PoseScorer : MonoBehaviour
     public GameObject ReferenceAvatar; 
 
     [Header("Scoring Parameters")]
-    // Increased to 45f to give the user more room for minor errors when matching the pose, allowing scores to reach 80-100%.
     [Tooltip("The maximum angular difference (in degrees) allowed before the score hits 0. This controls the sensitivity.")]
     public float MaxAngleDeviation = 45f; 
 
     [Tooltip("If true, leg bones are excluded from the score. Useful for upper-body tracking where legs are noisy.")]
-    public bool IgnoreLegs = true; // Default to TRUE to fix the jittery leg issue
+    public bool IgnoreLegs = true;
 
     [Header("Weighted Scoring")]
-    // Increased to 10.0f to heavily prioritize the accuracy of actively moving limbs.
     [Tooltip("The weight applied to bones actively moving in the reference animation.")]
     public float ActiveBoneWeight = 10.0f; 
 
-    // Significantly decreased to 0.01f to virtually eliminate the impact of noise on static (non-moving) bones when idle.
     [Tooltip("The weight applied to bones that are stationary in the reference animation (to minimize noise impact).")]
     public float PassiveBoneWeight = 0.01f; 
 
-    // Increased to 3.0f to ensure only intentional animation movement is counted as 'active'.
     [Tooltip("Angular movement threshold (degrees per frame) for a reference bone to be considered 'active'.")]
     public float MovementThresholdDegrees = 3.0f; 
 
@@ -42,6 +39,22 @@ public class PoseScorer : MonoBehaviour
     [Tooltip("Root Mean Square deviation (punishes large errors more than average).")]
     public float RMSDeviation = 0f;
 
+    [Header("Text Display")]
+    [Tooltip("TextMeshPro object to display the score")]
+    public TextMeshProUGUI scoreText;
+
+    [Tooltip("Interval in seconds to display the score")]
+    public float displayInterval = 7f;
+
+    [Tooltip("Duration in seconds to keep the text visible")]
+    public float displayDuration = 2f;
+
+    [Tooltip("The Animator on the Reference Avatar")]
+    public Animator referenceAnimatorForDisplay;
+
+    [Tooltip("Name of the default/idle animation to skip scoring display for")]
+    public string defaultAnimationName = "Idle";
+
     // --- Internal State ---
     private bool isMapped = false;
     
@@ -50,43 +63,38 @@ public class PoseScorer : MonoBehaviour
     
     private Animator referenceAnimator;
 
-    // State for Weighted Scoring
     private Dictionary<string, Quaternion> previousRefRotations = new Dictionary<string, Quaternion>();
     private Dictionary<string, float> currentBoneWeights = new Dictionary<string, float>();
 
-    // New variables for Summary Scoring
     private float scoreAccumulator = 0f;
     private int scoreFrameCount = 0;
     
-    // Timer variables for periodic logging (New in this version)
     private float scoringTimer = 0f;
-    private const float SummaryIntervalSeconds = 10f; // Log a summary every 10 seconds
+    private const float SummaryIntervalSeconds = 10f;
 
+    // Text display variables
+    private float displayTimer = 0f;
+    private float visibilityTimer = 0f;
+    private bool isTextVisible = false;
 
     // --- Bone Path Definitions ---
-    // Includes paths for both the Live Avatar (with Armature prefix) and the Reference Avatar (without Armature prefix)
     public static readonly Dictionary<string, string[]> BonePathsToCompare = new Dictionary<string, string[]>
     {
-        // Key: Bone Name for Logging/Grouping. Value: Array of possible full paths.
         {"Hips", new[] {"Armature/Hips", "Hips"}},
         {"Spine1", new[] {"Armature/Hips/Spine/Spine1", "Hips/Spine/Spine1"}},
         {"Spine2", new[] {"Armature/Hips/Spine/Spine1/Spine2", "Hips/Spine/Spine1/Spine2"}},
         
-        // Left Arm
         {"LShoulder", new[] {"Armature/Hips/Spine/Spine1/Spine2/LeftShoulder", "Hips/Spine/Spine1/Spine2/LeftShoulder"}},
         {"LArm", new[] {"Armature/Hips/Spine/Spine1/Spine2/LeftShoulder/LeftArm", "Hips/Spine/Spine1/Spine2/LeftShoulder/LeftArm"}},
         {"LForeArm", new[] {"Armature/Hips/Spine/Spine1/Spine2/LeftShoulder/LeftArm/LeftForeArm", "Hips/Spine/Spine1/Spine2/LeftShoulder/LeftArm/LeftForeArm"}},
         
-        // Right Arm
         {"RShoulder", new[] {"Armature/Hips/Spine/Spine1/Spine2/RightShoulder", "Hips/Spine/Spine1/Spine2/RightShoulder"}},
         {"RArm", new[] {"Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm", "Hips/Spine/Spine1/Spine2/RightShoulder/RightArm"}},
         {"RForeArm", new[] {"Armature/Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm", "Hips/Spine/Spine1/Spine2/RightShoulder/RightArm/RightForeArm"}},
         
-        // Left Leg (Excluded if IgnoreLegs is true)
         {"LUpLeg", new[] {"Armature/Hips/LeftUpLeg", "Hips/LeftUpLeg"}},
         {"LLeg", new[] {"Armature/Hips/LeftUpLeg/LeftLeg", "Hips/LeftUpLeg/LeftLeg"}}, 
 
-        // Right Leg (Excluded if IgnoreLegs is true)
         {"RUpLeg", new[] {"Armature/Hips/RightUpLeg", "Hips/RightUpLeg"}},
         {"RLeg", new[] {"Armature/Hips/RightUpLeg/RightLeg", "Hips/RightUpLeg/RightLeg"}}, 
     };
@@ -121,6 +129,22 @@ public class PoseScorer : MonoBehaviour
             Debug.LogWarning("[PoseScorer] Warning: Live Avatar has an enabled Animator. This might conflict with the AvatarController script.");
         }
 
+        // Initialize text display
+        if (scoreText != null)
+        {
+            scoreText.enabled = false;
+            isTextVisible = false;
+        }
+        else
+        {
+            Debug.LogWarning("[PoseScorer] scoreText TextMeshProUGUI is not assigned!");
+        }
+
+        if (referenceAnimatorForDisplay == null)
+        {
+            referenceAnimatorForDisplay = ReferenceAvatar.GetComponent<Animator>();
+        }
+
         Debug.Log("[PoseScorer] Initialized. Waiting for bones...");
     }
 
@@ -132,11 +156,9 @@ public class PoseScorer : MonoBehaviour
             string boneKey = kvp.Key;
             string[] possiblePaths = kvp.Value;
 
-            // Skip legs if the option is checked
             if (IgnoreLegs && (boneKey.Contains("Leg") || boneKey.Contains("UpLeg"))) continue;
             
             Transform foundBone = null;
-            // Check all possible paths for this bone
             foreach (string path in possiblePaths)
             {
                 foundBone = root.Find(path);
@@ -145,7 +167,6 @@ public class PoseScorer : MonoBehaviour
 
             if (foundBone != null) 
             {
-                // Store the bone using the simplified Bone Key (e.g., "Hips", "LArm")
                 map.Add(boneKey, foundBone);
             }
         }
@@ -160,7 +181,6 @@ public class PoseScorer : MonoBehaviour
             
             if (liveBones.Count > 0 && referenceBones.Count > 0)
             {
-                // Check if the number of mapped bones is consistent between Live and Reference
                 if (liveBones.Count != referenceBones.Count)
                 {
                     Debug.LogWarning($"[PoseScorer] Mismatch in mapped bone count! Live: {liveBones.Count}, Reference: {referenceBones.Count}. Scoring may be inaccurate.");
@@ -174,39 +194,80 @@ public class PoseScorer : MonoBehaviour
             return;
         }
         
-        // --- 1. Perform Scoring and Tracking ---
-        // Scoring runs every frame the PoseScorer component is active.
+        // Perform Scoring
         CalculateBoneWeights();
-        CalculateRMSScore(); // Accumulates scores into scoreAccumulator/scoreFrameCount
+        CalculateRMSScore();
 
-        // --- 2. Update Timer ---
+        // Update console logging timer
         scoringTimer += Time.deltaTime;
-
-        // --- 3. Timer Check: Log Summary if 10 seconds have passed ---
         if (scoringTimer >= SummaryIntervalSeconds)
         {
             if (scoreFrameCount > 0)
             {
                 float averageScore = scoreAccumulator / scoreFrameCount;
                 string starRating = GetStarRatingString(averageScore); 
-                
-                // Log the summary for the completed 10-second interval, including the star rating
                 Debug.Log($"[Score] Score: {averageScore:F1}% Stars: ({starRating})");
             }
             else
             {
-                // This happens if the user was AFK/untracked for the entire interval
                 Debug.Log("[Score] 10 Second Interval passed, but no scoring data was recorded.");
             }
 
-            // Reset timer and accumulators for the next interval
             scoringTimer = 0f;
             scoreAccumulator = 0f;
             scoreFrameCount = 0;
         }
+
+        // Update text display timer
+        UpdateScoreDisplay();
     }
 
-    // NEW: Helper function to determine and return the star rating string based on the average score.
+    private void UpdateScoreDisplay()
+    {
+        if (scoreText == null) return;
+
+        // Check if the default animation is currently playing
+        if (referenceAnimatorForDisplay != null)
+        {
+            AnimatorStateInfo stateInfo = referenceAnimatorForDisplay.GetCurrentAnimatorStateInfo(0);
+            if (stateInfo.IsName(defaultAnimationName))
+            {
+                // Default animation is playing, don't show score
+                if (isTextVisible)
+                {
+                    scoreText.enabled = false;
+                    isTextVisible = false;
+                }
+                return;
+            }
+        }
+
+        displayTimer += Time.deltaTime;
+
+        // Check if it's time to show the score
+        if (displayTimer >= displayInterval)
+        {
+            // Display the score
+            scoreText.text = $"Score: {AccuracyScore:F0}";
+            scoreText.enabled = true;
+            isTextVisible = true;
+            visibilityTimer = 0f;
+            displayTimer = 0f;
+        }
+
+        // If text is visible, count down the visibility duration
+        if (isTextVisible)
+        {
+            visibilityTimer += Time.deltaTime;
+
+            if (visibilityTimer >= displayDuration)
+            {
+                scoreText.enabled = false;
+                isTextVisible = false;
+            }
+        }
+    }
+
     private string GetStarRatingString(float score)
     {
         int starCount = 0;
@@ -227,18 +288,16 @@ public class PoseScorer : MonoBehaviour
         {
             starCount = 2;
         }
-        else // score < 40f
+        else
         {
             starCount = 1;
         }
 
-        // Return a string composed of the appropriate number of star characters
         return new string('*', starCount);
     }
 
     private void CalculateBoneWeights()
     {
-        // Iterate over all reference bones to determine if they are active (moving)
         foreach (var refBoneEntry in referenceBones)
         {
             string boneKey = refBoneEntry.Key;
@@ -246,10 +305,8 @@ public class PoseScorer : MonoBehaviour
 
             if (previousRefRotations.TryGetValue(boneKey, out Quaternion previousRot))
             {
-                // Calculate angular movement (velocity) since the last frame
                 float angularDelta = Quaternion.Angle(refBone.rotation, previousRot);
                 
-                // If the bone has moved more than the threshold, assign the active weight
                 if (angularDelta > MovementThresholdDegrees)
                 {
                     currentBoneWeights[boneKey] = ActiveBoneWeight;
@@ -261,11 +318,9 @@ public class PoseScorer : MonoBehaviour
             }
             else
             {
-                // Initialize the weight and previous rotation for the first frame
                 currentBoneWeights[boneKey] = PassiveBoneWeight;
             }
 
-            // Update previous rotation for the next frame's calculation
             previousRefRotations[boneKey] = refBone.rotation;
         }
     }
@@ -273,24 +328,19 @@ public class PoseScorer : MonoBehaviour
     private void CalculateRMSScore()
     {
         float sumWeightedSquaredError = 0f;
-        float totalWeight = 0f; // Sum of all applied weights
+        float totalWeight = 0f;
         
         string worstBoneName = "None";
         float worstBoneError = -1f;
 
-        // --- Step 1: Establish World-Relative Alignment ---
-        // We use the Hips bone's World Rotation to normalize the two avatar spaces.
         Quaternion refHipsInverseWorld = Quaternion.identity;
         
         if (liveBones.TryGetValue("Hips", out Transform liveHips) && 
             referenceBones.TryGetValue("Hips", out Transform referenceHips))
         {
-            // Get the inverse world rotation of the reference hips. 
-            // This transforms all bone rotations into the reference hips' local frame.
             refHipsInverseWorld = Quaternion.Inverse(referenceHips.rotation);
         }
 
-        // --- Step 2: Calculate Weighted RMS Error ---
         foreach (var liveBoneEntry in liveBones)
         {
             string boneKey = liveBoneEntry.Key;
@@ -302,21 +352,17 @@ public class PoseScorer : MonoBehaviour
                 Quaternion liveRotRelative;
                 Quaternion refRotRelative;
                 
-                // Transform both Live and Reference bone world rotations into the Reference Hips' local space.
                 liveRotRelative = refHipsInverseWorld * liveBone.rotation;
                 refRotRelative = refHipsInverseWorld * refBone.rotation;
                 
-                // 1. Calculate Pose Error (Angular difference)
                 float poseError = Quaternion.Angle(liveRotRelative, refRotRelative);
                 
-                // Track the worst bone for debugging
                 if (poseError > worstBoneError)
                 {
                     worstBoneError = poseError;
-                    worstBoneName = boneKey; // Use the simplified key name
+                    worstBoneName = boneKey;
                 }
 
-                // 2. Accumulate Weighted Squared Error (RMS Method)
                 sumWeightedSquaredError += (weight * poseError * poseError);
                 totalWeight += weight;
             }
@@ -324,18 +370,12 @@ public class PoseScorer : MonoBehaviour
         
         if (totalWeight == 0f) return;
 
-        // 3. Calculate Weighted Root Mean Square
         RMSDeviation = Mathf.Sqrt(sumWeightedSquaredError / totalWeight);
 
-        // 4. Convert to Score
         float normalizedError = Mathf.Clamp01(RMSDeviation / MaxAngleDeviation);
         AccuracyScore = (1f - normalizedError) * 100f;
         
-        // Accumulate score for summary calculation
         scoreAccumulator += AccuracyScore;
         scoreFrameCount++;
     }
 }
-// 55 - 3 stars
-// 62 - 4 stars
-// 68+ - 5 stars
