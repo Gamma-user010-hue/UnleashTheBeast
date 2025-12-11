@@ -39,6 +39,9 @@ public class PoseScorer : MonoBehaviour
     [Tooltip("Root Mean Square deviation (punishes large errors more than average).")]
     public float RMSDeviation = 0f;
 
+    [Tooltip("The average score over the current interval.")]
+    public float AverageScore = 0f;
+
     [Header("Text Display")]
     [Tooltip("TextMeshPro object to display the score")]
     public TextMeshProUGUI scoreText;
@@ -204,13 +207,14 @@ public class PoseScorer : MonoBehaviour
         {
             if (scoreFrameCount > 0)
             {
-                float averageScore = scoreAccumulator / scoreFrameCount;
-                string starRating = GetStarRatingString(averageScore); 
-                Debug.Log($"[Score] Score: {averageScore:F1}% Stars: ({starRating})");
+                AverageScore = scoreAccumulator / scoreFrameCount;
+                string starRating = GetStarRatingString(AverageScore); 
+                Debug.Log($"[Score] Score: {AverageScore:F1}% Stars: ({starRating})");
             }
             else
             {
                 Debug.Log("[Score] 10 Second Interval passed, but no scoring data was recorded.");
+                AverageScore = 0f;
             }
 
             scoringTimer = 0f;
